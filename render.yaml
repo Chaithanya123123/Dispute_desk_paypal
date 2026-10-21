@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: disputedesk-api
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PAYPAL_MOCK
+        value: true
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+  - type: web
+    name: disputedesk-web
+    env: node
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NEXT_PUBLIC_API
+        fromService:
+          name: disputedesk-api
+          type: web
+          property: host
