@@ -57,24 +57,31 @@ def verify_webhook_signature(headers: dict, event: dict) -> bool:
     webhook_id = os.getenv("PAYPAL_WEBHOOK_ID", "")
     if MOCK or not webhook_id:
         return True
-    token = get_access_token()
-    body = {
-        "transmission_id": headers.get("paypal-transmission-id", ""),
-        "transmission_time": headers.get("paypal-transmission-time", ""),
-        "cert_url": headers.get("paypal-cert-url", ""),
-        "auth_algo": headers.get("paypal-auth-algo", ""),
-        "transmission_sig": headers.get("paypal-transmission-sig", ""),
-        "webhook_id": webhook_id,
-        "webhook_event": event,
-    }
-    r = requests.post(
-        f"{PAYPAL_BASE}/v1/notifications/verify-webhook-signature",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json=body,
-        timeout=15,
-    )
-    r.raise_for_status()
-    return r.json().get("verification_status") == "SUCCESS"
+    required = ("paypal-transmission-id", "paypal-transmission-time",
+                "paypal-cert-url", "paypal-auth-algo", "paypal-transmission-sig")
+    if not all(headers.get(h) for h in required):
+        return False
+    try:
+        token = get_access_token()
+        body = {
+            "transmission_id": headers.get("paypal-transmission-id", ""),
+            "transmission_time": headers.get("paypal-transmission-time", ""),
+            "cert_url": headers.get("paypal-cert-url", ""),
+            "auth_algo": headers.get("paypal-auth-algo", ""),
+            "transmission_sig": headers.get("paypal-transmission-sig", ""),
+            "webhook_id": webhook_id,
+            "webhook_event": event,
+        }
+        r = requests.post(
+            f"{PAYPAL_BASE}/v1/notifications/verify-webhook-signature",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=body,
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json().get("verification_status") == "SUCCESS"
+    except Exception:
+        return False
 
 def make_offer(paypal_dispute_id: str, offer_type: str, amount: float | None = None) -> dict:
     """POST /v1/customer/disputes/{id}/make-offer — refund / partial offer."""

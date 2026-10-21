@@ -1,4 +1,8 @@
 """Checks for validator + template agent + policy gates. Run: python test_validator.py"""
+import os
+# Unit tests must never call live PayPal: force MOCK before app modules load
+# (load_dotenv uses override=False, so a pre-set env var wins over .env)
+os.environ["PAYPAL_MOCK"] = "true"
 import asyncio
 from fastapi import HTTPException
 from app.validator import validate_agent_output
