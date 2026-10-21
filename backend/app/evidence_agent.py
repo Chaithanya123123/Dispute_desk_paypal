@@ -100,6 +100,7 @@ async def run_evidence_agent(case: DisputeCase) -> DisputeCase:
 
 async def _call_anthropic(case: DisputeCase, api_key: str) -> Optional[str]:
     import json, httpx
+    base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
     payload = {
         "model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
         "max_tokens": 1500,
@@ -110,7 +111,7 @@ async def _call_anthropic(case: DisputeCase, api_key: str) -> Optional[str]:
     try:
         async with httpx.AsyncClient(timeout=30) as c:
             r = await c.post(
-                "https://api.anthropic.com/v1/messages",
+                f"{base}/v1/messages",
                 headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
                          "content-type": "application/json"},
                 json=payload,
@@ -124,6 +125,9 @@ async def _call_anthropic(case: DisputeCase, api_key: str) -> Optional[str]:
 
 async def _call_openai(case: DisputeCase, api_key: str) -> Optional[str]:
     import json, httpx
+    # OpenAI-compatible endpoint: any provider works via OPENAI_BASE_URL
+    # (api.openai.com default; e.g. https://api.groq.com/openai/v1, https://openrouter.ai/api/v1)
+    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     payload = {
         "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         "messages": [
@@ -136,10 +140,15 @@ async def _call_openai(case: DisputeCase, api_key: str) -> Optional[str]:
     try:
         async with httpx.AsyncClient(timeout=30) as c:
             r = await c.post(
-                "https://api.openai.com/v1/chat/completions",
+                f"{base}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json=payload,
             )
+            if r.status_code >= 400 and "response_format" in str(payload):
+                # some OpenAI-compatible providers reject response_format -> retry without it
+                payload.pop("response_format", None)
+                r = await c.post(f"{base}/chat/completions",
+                                 headers={"Authorization": f"Bearer {api_key}"}, json=payload)
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
     except Exception as e:

@@ -86,7 +86,8 @@ def apply_policy(case: DisputeCase) -> DisputeCase:
         limit = _auto_limit(case)
         ok, err = _safe(paypal_client.provide_evidence,
                         case.paypal_dispute_id or case.case_id,
-                        {"response": case.drafted_response, "summary": case.evidence_summary})
+                        {"response": case.drafted_response, "summary": case.evidence_summary,
+                         "tracking_number": (case.order.tracking_number if case.order else "")})
         if not ok:
             return _hold(case, f"Auto-submit failed (PayPal API error: {err}) — human review required",
                          "PAYPAL_API_ERROR")

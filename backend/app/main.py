@@ -57,6 +57,38 @@ def _to_amount(raw) -> float | None:
     except (TypeError, ValueError):
         return None
 
+def _payload_fields(res: dict) -> dict:
+    """Normalize a PayPal dispute payload (webhook resource, list item, or enriched
+    detail) into case fields. One implementation shared by webhook intake + sync."""
+    reason = normalize_reason(res.get("reason", ""))
+    amount = _to_amount(res.get("dispute_amount") or res.get("disputed_amount") or res.get("amount"))
+    raw_amt = res.get("dispute_amount") or res.get("disputed_amount") or res.get("amount")
+    currency = "USD"
+    if isinstance(raw_amt, dict) and raw_amt.get("currency_code"):
+        currency = raw_amt["currency_code"]
+    respond_by = (
+        res.get("seller_response_due_date") or res.get("response_deadline")
+        or res.get("respond_by") or (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    )
+    # Buyer messages: messages[] entries and/or a top-level buyer_message (deduped, buyer only)
+    msgs: list = [m.get("content") for m in (res.get("messages") or [])
+                  if isinstance(m, dict) and m.get("posted_by") == "BUYER" and m.get("content")]
+    if res.get("buyer_message") and res["buyer_message"] not in msgs:
+        msgs.append(res["buyer_message"])
+    if not msgs:
+        msgs = ["Item never arrived"]
+    order = OrderInfo(
+        order_id=res.get("invoice_number") or res.get("order_id") or new_id("ORD"),
+        amount=amount or 0.0,
+        buyer_email=res.get("buyer_email", "buyer@example.com"),
+        tracking_number=res.get("tracking_number", ""),
+        tracking_status=res.get("tracking_status", ""),
+        purchase_date=res.get("create_time", now_iso()),
+    )
+    return {"reason": reason, "amount": amount, "currency": currency,
+            "respond_by": respond_by, "order": order, "buyer_msgs": msgs,
+            "already_refunded": bool(res.get("already_refunded"))}
+
 async def _pipeline(case: DisputeCase) -> DisputeCase:
     """Shared case pipeline: agent -> risk scan -> policy. Used by webhook + simulator."""
     case = await run_evidence_agent(case)
@@ -117,15 +149,7 @@ async def paypal_webhook(request: Request, event: dict):
             log("GLOBAL", "DISPUTE_ENRICHED", f"Live fetch for {pp_id} ok", actor="system")
         except Exception as e:
             log("GLOBAL", "DISPUTE_ENRICH_WARN", f"Live fetch failed for {pp_id}: {e}", actor="system")
-    reason = normalize_reason(res.get("reason", ""))
-    amount = _to_amount(res.get("disputed_amount") or res.get("amount"))
-    raw_amt = res.get("disputed_amount") or res.get("amount")
-    currency = "USD"
-    if isinstance(raw_amt, dict) and raw_amt.get("currency_code"):
-        currency = raw_amt["currency_code"]
-    # PayPal response deadline: use payload value when present, else ~7 days from receipt
-    respond_by = res.get("response_deadline") or res.get("respond_by") or (
-        datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    f = _payload_fields(res)
 
     existing = find_by_paypal_id(pp_id)
     if existing and existing.status in ("AUTO_RESOLVED", "SUBMITTED", "REJECTED"):
@@ -135,35 +159,29 @@ async def paypal_webhook(request: Request, event: dict):
         return {"case_id": existing.case_id, "status": existing.status,
                 "decision": existing.policy_decision, "duplicate": True}
 
-    order = OrderInfo(
-        order_id=res.get("invoice_number") or res.get("order_id") or new_id("ORD"),
-        amount=amount or 0.0,
-        buyer_email=res.get("buyer_email", "buyer@example.com"),
-        tracking_number=res.get("tracking_number", ""),
-        tracking_status=res.get("tracking_status", ""),
-        purchase_date=res.get("create_time", now_iso()),
-    )
     if existing:
         case = existing
-        case.reason = reason
-        case.amount = amount or case.amount
-        case.amount_known = amount is not None
-        case.currency = currency
-        case.respond_by = respond_by
-        case.order = order
-        # UPDATED events may carry a new buyer message — append and re-scan (injection can arrive late)
-        new_msg = res.get("buyer_message")
-        if new_msg and not any(m.get("text") == new_msg for m in case.customer_messages):
-            case.customer_messages.append({"from": "buyer", "text": new_msg})
+        case.reason = f["reason"]
+        case.amount = f["amount"] or case.amount
+        case.amount_known = f["amount"] is not None
+        case.currency = f["currency"]
+        case.respond_by = f["respond_by"]
+        case.order = f["order"]
+        # UPDATED events may carry new buyer messages — append and re-scan (injection can arrive late)
+        for text in f["buyer_msgs"]:
+            if not any(m.get("text") == text for m in case.customer_messages):
+                case.customer_messages.append({"from": "buyer", "text": text})
         log(case.case_id, "DISPUTE_UPDATED", f"Webhook {etype} dispute {pp_id}", actor="system")
     else:
-        case = DisputeCase(paypal_dispute_id=pp_id, reason=reason, amount=amount or 0.0,
-            amount_known=amount is not None, currency=currency, respond_by=respond_by,
-            already_refunded=bool(res.get("already_refunded")), order=order,
-            customer_messages=[{"from": "buyer", "text": res.get("buyer_message", "Item never arrived")}])
+        case = DisputeCase(paypal_dispute_id=pp_id, reason=f["reason"],
+            amount=f["amount"] or 0.0, amount_known=f["amount"] is not None,
+            currency=f["currency"], respond_by=f["respond_by"],
+            already_refunded=f["already_refunded"], order=f["order"],
+            customer_messages=[{"from": "buyer", "text": m} for m in f["buyer_msgs"]])
         upsert_case(case)
         log(case.case_id, "DISPUTE_RECEIVED",
-            f"Webhook {etype} dispute {pp_id} ${amount if amount is not None else 'unknown'}", actor="system")
+            f"Webhook {etype} dispute {pp_id} ${f['amount'] if f['amount'] is not None else 'unknown'}",
+            actor="system")
     case = await _pipeline(case)
     return {"case_id": case.case_id, "status": case.status, "decision": case.policy_decision}
 
@@ -223,41 +241,21 @@ async def sync_disputes():
         except Exception:
             live = item
         res = {**item, **live} if isinstance(live, dict) else item
-        reason = normalize_reason(res.get("reason", ""))
-        amount = _to_amount(res.get("dispute_amount") or res.get("disputed_amount") or res.get("amount"))
-        raw_amt = res.get("dispute_amount") or res.get("disputed_amount") or res.get("amount")
-        currency = "USD"
-        if isinstance(raw_amt, dict) and raw_amt.get("currency_code"):
-            currency = raw_amt["currency_code"]
-        respond_by = res.get("seller_response_due_date") or res.get("response_deadline") or res.get("respond_by") or (
-            datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-
-        messages = res.get("messages") or []
-        buyer_msgs = [m.get("content") for m in messages if isinstance(m, dict) and m.get("posted_by") == "BUYER" and m.get("content")]
-        first_msg = buyer_msgs[0] if buyer_msgs else res.get("buyer_message", "Item never arrived")
-
-        order = OrderInfo(
-            order_id=res.get("invoice_number") or res.get("order_id") or new_id("ORD"),
-            amount=amount or 0.0,
-            buyer_email=res.get("buyer_email", "buyer@example.com"),
-            tracking_number=res.get("tracking_number", ""),
-            tracking_status=res.get("tracking_status", ""),
-            purchase_date=res.get("create_time", now_iso()),
-        )
+        f = _payload_fields(res)
         case = DisputeCase(
             paypal_dispute_id=pp_id,
-            reason=reason,
-            amount=amount or 0.0,
-            amount_known=amount is not None,
-            currency=currency,
-            respond_by=respond_by,
-            already_refunded=bool(res.get("already_refunded")),
-            order=order,
-            customer_messages=[{"from": "buyer", "text": first_msg}]
+            reason=f["reason"],
+            amount=f["amount"] or 0.0,
+            amount_known=f["amount"] is not None,
+            currency=f["currency"],
+            respond_by=f["respond_by"],
+            already_refunded=f["already_refunded"],
+            order=f["order"],
+            customer_messages=[{"from": "buyer", "text": m} for m in f["buyer_msgs"]],
         )
         upsert_case(case)
         log(case.case_id, "DISPUTE_RECEIVED",
-            f"Synced dispute {pp_id} ", actor="system")
+            f"Synced dispute {pp_id}", actor="system")
         case = await _pipeline(case)
         ingested.append(case.case_id)
     return {"synced": len(ingested), "cases": ingested}
@@ -282,7 +280,8 @@ def approve(case_id: str):
         raise HTTPException(409, f"case is {c.status}; only WAITING_APPROVAL cases can be approved")
     try:
         paypal_client.provide_evidence(c.paypal_dispute_id or c.case_id,
-            {"response": c.drafted_response, "summary": c.evidence_summary})
+            {"response": c.drafted_response, "summary": c.evidence_summary,
+             "tracking_number": (c.order.tracking_number if c.order else "")})
     except Exception as e:
         log(case_id, "PAYPAL_API_ERROR", f"approve submit failed: {e}", actor="merchant")
         raise HTTPException(502, f"PayPal API error: {e}")

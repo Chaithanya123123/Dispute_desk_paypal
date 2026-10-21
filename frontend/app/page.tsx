@@ -19,6 +19,33 @@ export default function Page() {
   const [selected, setSelected] = useState<any>(null);
   const [policy, setPolicy] = useState<any>(null);
   const [err, setErr] = useState('');
+  const [info, setInfo] = useState('');
+  const [deskToken, setDeskToken] = useState('');
+
+  useEffect(() => { setDeskToken(localStorage.getItem('desk_token') || ''); }, []);
+  const saveToken = (v: string) => { setDeskToken(v); localStorage.setItem('desk_token', v); };
+  const auth = () => (deskToken ? { 'X-Desk-Token': deskToken } : {});
+
+  // All backend calls go through here: attaches X-Desk-Token, surfaces errors
+  const call = async (path: string, opts: RequestInit = {}): Promise<any> => {
+    try {
+      const r = await fetch(`${API}${path}`, {
+        ...opts,
+        headers: { 'Content-Type': 'application/json', ...(auth() as any), ...((opts.headers as any) || {}) },
+      });
+      if (!r.ok) {
+        let detail = '';
+        try { detail = String((await r.json()).detail || ''); } catch { /* body not json */ }
+        setErr(`HTTP ${r.status}${detail ? ` — ${detail.slice(0, 300)}` : ''}`);
+        return null;
+      }
+      setErr('');
+      return await r.json().catch(() => ({}));
+    } catch {
+      setErr(`Backend unreachable at ${API} — is the server running?`);
+      return null;
+    }
+  };
 
   const load = async () => {
     try {
@@ -39,38 +66,44 @@ export default function Page() {
   }, []);
 
   const simulate = async (amount: number, reason: string, tracking = 'Delivered Oct 10, signed') => {
-    await fetch(`${API}/api/simulate/dispute`, { method: 'POST', headers: {'Content-Type':'application/json'},
+    const r = await call('/api/simulate/dispute', { method: 'POST',
       body: JSON.stringify({ amount, reason, tracking_status: tracking, buyer_email: 'buyer@example.com' }) });
-    load();
+    if (r) load();
   };
   const simulateScenario = async (scenario: string) => {
-    await fetch(`${API}/api/simulate/dispute`, { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ scenario }) });
-    load();
+    const r = await call('/api/simulate/dispute', { method: 'POST', body: JSON.stringify({ scenario }) });
+    if (r) load();
+  };
+  const syncFromPayPal = async () => {
+    setInfo('Syncing disputes from PayPal…');
+    const r = await call('/api/disputes/sync', { method: 'POST' });
+    if (r) {
+      setInfo(r.message || (r.synced ? `Synced ${r.synced} dispute(s) from PayPal` : 'No new disputes on PayPal'));
+      load();
+    } else setInfo('');
   };
   const act = async (id: string, kind: string) => {
-    await fetch(`${API}/api/cases/${id}/${kind}`, { method: 'POST' }); load();
+    const r = await call(`/api/cases/${id}/${kind}`, { method: 'POST' });
+    load(); return r;
   };
   const saveDraft = async (id: string) => {
     const el = document.getElementById(`draft-${id}`) as HTMLTextAreaElement | null;
     if (!el) return;
-    await fetch(`${API}/api/cases/${id}/draft`, { method: 'PUT', headers: {'Content-Type':'application/json'},
+    const r = await call(`/api/cases/${id}/draft`, { method: 'PUT',
       body: JSON.stringify({ draft_response: el.value }) });
-    load();
+    if (r) load();
   };
   const counteroffer = async (id: string) => {
     const el = document.getElementById(`offer-${id}`) as HTMLInputElement | null;
     const amt = parseFloat(el?.value || '0');
-    if (!(amt > 0)) return;
-    await fetch(`${API}/api/cases/${id}/counteroffer`, { method: 'POST', headers: {'Content-Type':'application/json'},
+    if (!(amt > 0)) { setErr('Enter an offer amount greater than 0'); return; }
+    const r = await call(`/api/cases/${id}/counteroffer`, { method: 'POST',
       body: JSON.stringify({ amount: amt }) });
-    load();
+    if (r) load();
   };
   const savePolicy = async () => {
-    await fetch(`${API}/api/policy`, { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(policy) });
-    fetch(`${API}/api/policy`).then(r => r.json()).then(setPolicy).catch(() => {});
-    load();
+    const r = await call('/api/policy', { method: 'POST', body: JSON.stringify(policy) });
+    if (r) { setPolicy(r); load(); }
   };
 
   const cols = [
@@ -119,6 +152,7 @@ export default function Page() {
       <h1>DisputeDesk — PayPal Dispute Evidence Agent</h1>
       <p style={{ opacity: .7 }}>The AI prepares the case, the seller&apos;s rules decide the money, and every step is logged.</p>
       {err && <p style={{ color: '#ff7b72', background: '#2d1b1b', padding: 8, borderRadius: 8 }}>{err}</p>}
+      {info && <p style={{ color: '#3fb950', background: '#12261a', padding: 8, borderRadius: 8 }}>{info}</p>}
       <div style={{ display: 'flex', gap: 8, margin: '16px 0', flexWrap: 'wrap', alignItems: 'center' }}>
         <button onClick={() => simulate(29.99, 'ITEM_NOT_RECEIVED')}>Simulate $29 dispute (auto-resolve)</button>
         <button onClick={() => simulate(25.0, 'UNAUTHORIZED')}>Simulate $25 unauthorized (auto-refund)</button>
@@ -134,7 +168,14 @@ export default function Page() {
           <option value="already_refunded">Already refunded</option>
           <option value="partial_dispute">Partial dispute ($30 of $180)</option>
         </select>
+        <button onClick={syncFromPayPal}>Sync from PayPal</button>
         <button onClick={load}>Refresh</button>
+        <label style={{ fontSize: 12, opacity: .75, display: 'flex', gap: 6, alignItems: 'center', marginLeft: 'auto' }}>
+          Desk token:
+          <input type="password" placeholder="if DESK_TOKEN set" value={deskToken}
+            onChange={e => saveToken(e.target.value)}
+            style={{ width: 140, background: '#0d1117', color: '#e6edf3', border: '1px solid #30363d', borderRadius: 6, padding: '4px 6px' }} />
+        </label>
       </div>
       {policy && (
         <div style={{ background: '#151a26', padding: 12, borderRadius: 12, marginBottom: 16, display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
