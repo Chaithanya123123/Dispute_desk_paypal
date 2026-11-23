@@ -1,11 +1,15 @@
 # DisputeDesk
 
+[![CI](https://github.com/Chaithanya123123/Dispute_desk_paypal/actions/workflows/ci.yml/badge.svg)](https://github.com/Chaithanya123123/Dispute_desk_paypal/actions/workflows/ci.yml)
+
 **An AI agent that prepares every PayPal dispute for the merchant, and only moves money inside rules the merchant wrote.**
 
 > **The LLM proposes. Code decides.**
 
-**Live demo:** https://dispute-desk-paypal-1.onrender.com (API: try `/health` and `/api/scenarios`)
-**Demo video:** see `DEMO_SCRIPT.md` for the 3-minute walkthrough
+**Live API:** [health](https://dispute-desk-paypal-1.onrender.com/health) · [demo scenarios](https://dispute-desk-paypal-1.onrender.com/api/scenarios) (free tier, so the first request can take up to a minute). The dashboard runs locally for now.
+
+**Demo walkthrough:** [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md)
+
 **Built for:** Best Use of PayPal + AI, Best Use of Agentic Commerce, Best Demo Delivery (plus the AG Grid and Render sponsor prizes)
 
 ---
@@ -218,7 +222,7 @@ The tests are hermetic: they force mock mode and need no keys or network.
 | `GET /api/audit` | Immutable action log (the AG Grid audit view reads this) |
 | `GET /api/scenarios` · `GET /health` | Demo scenario list / liveness plus mock-mode flag |
 
-State-changing routes (`approve`, `reject`, `counteroffer`, `draft` edit, `policy` update) require the `X-Desk-Token` header when `DESK_TOKEN` is set. See [Security](#security).
+State-changing routes (`approve`, `reject`, `counteroffer`, `draft` edit, `policy` update, `disputes/sync`) require the `X-Desk-Token` header when `DESK_TOKEN` is set. See [Security](#security).
 
 ---
 
@@ -287,7 +291,7 @@ Before hosting publicly, set `DESK_TOKEN` to a long random string in the backend
 `render.yaml` defines two free-tier **web services**:
 
 - `disputedesk-api`: Python/uvicorn, pinned `PYTHON_VERSION=3.12`
-- `disputedesk-web`: Next.js. Its `NEXT_PUBLIC_API` is wired to the API service automatically
+- `disputedesk-web`: Next.js. Its `NEXT_PUBLIC_API` is the public API URL; change it in `render.yaml` if your API service has a different address
 
 **Live API:** https://dispute-desk-paypal-1.onrender.com
 
