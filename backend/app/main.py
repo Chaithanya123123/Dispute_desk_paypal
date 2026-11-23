@@ -1,3 +1,4 @@
+import hmac
 import os
 from datetime import datetime, timedelta, timezone
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -41,7 +42,8 @@ def require_desk_token(request: Request):
     token = os.getenv("DESK_TOKEN", "")
     if not token:
         return
-    if request.headers.get("x-desk-token", "") != token:
+    supplied = request.headers.get("x-desk-token", "")
+    if not hmac.compare_digest(supplied.encode(), token.encode()):
         raise HTTPException(401, "missing or invalid X-Desk-Token header")
 
 PROTECTED = [Depends(require_desk_token)]
@@ -220,7 +222,8 @@ async def simulate(s: SimulateIn):
     return case.model_dump()
 
 
-@app.post("/api/disputes/sync")
+# Protected: syncing runs the pipeline, which can submit evidence or refunds to PayPal.
+@app.post("/api/disputes/sync", dependencies=PROTECTED)
 async def sync_disputes():
     """Poll live disputes from PayPal and ingest any new ones into the pipeline."""
     if paypal_client.MOCK:

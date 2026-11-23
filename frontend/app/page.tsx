@@ -1,10 +1,12 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
 
-const API = process.env.NEXT_PUBLIC_API || 'http://localhost:8000';
+// Hosting platforms sometimes inject a bare hostname, so add the scheme when it is missing.
+const rawApi = (process.env.NEXT_PUBLIC_API || 'http://localhost:8000').replace(/\/+$/, '');
+const API = /^https?:\/\//.test(rawApi) ? rawApi : `https://${rawApi}`;
 
 const CHECKLIST: Record<string, string[]> = {
   ITEM_NOT_RECEIVED: ['Tracking number', 'Delivery confirmation', 'Ship date', 'Buyer communication'],
@@ -19,6 +21,8 @@ export default function Page() {
   const [selected, setSelected] = useState<any>(null);
   const [policy, setPolicy] = useState<any>(null);
   const [err, setErr] = useState('');
+  const [offline, setOffline] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [info, setInfo] = useState('');
   const [deskToken, setDeskToken] = useState('');
 
@@ -28,6 +32,7 @@ export default function Page() {
 
   // All backend calls go through here: attaches X-Desk-Token, surfaces errors
   const call = async (path: string, opts: RequestInit = {}): Promise<any> => {
+    setBusy(true);
     try {
       const r = await fetch(`${API}${path}`, {
         ...opts,
@@ -44,26 +49,43 @@ export default function Page() {
     } catch {
       setErr(`Backend unreachable at ${API} — is the server running?`);
       return null;
+    } finally {
+      setBusy(false);
     }
   };
 
+  const getJson = async (path: string) => {
+    const r = await fetch(`${API}${path}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  };
+
+  // Polling only reports connection state. It must never clear an action error the user has not read.
+  const loading = useRef(false);
   const load = async () => {
+    if (loading.current) return;
+    loading.current = true;
     try {
-      const [c, a] = await Promise.all([
-        fetch(`${API}/api/cases`).then(r => r.json()),
-        fetch(`${API}/api/audit`).then(r => r.json()),
-      ]);
-      setCases(c); setAudit(a); setErr('');
+      const [c, a] = await Promise.all([getJson('/api/cases'), getJson('/api/audit')]);
+      setCases(c); setAudit(a); setOffline(false);
       setSelected((prev: any) =>
         prev ? (c.find((x: any) => x.case_id === prev.case_id) || (c[0] ?? null)) : (c[0] ?? null));
     } catch {
-      setErr(`Backend unreachable at ${API} — is uvicorn running?`);
+      setOffline(true);
+    } finally {
+      loading.current = false;
     }
   };
-  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, []);
   useEffect(() => {
-    fetch(`${API}/api/policy`).then(r => r.json()).then(setPolicy).catch(() => {});
+    load();
+    const t = setInterval(() => { if (!document.hidden) load(); }, 3000);
+    return () => clearInterval(t);
   }, []);
+  // Also runs after a reconnect, so the policy panel appears once a sleeping backend wakes up.
+  useEffect(() => {
+    if (offline || policy) return;
+    getJson('/api/policy').then(setPolicy).catch(() => {});
+  }, [offline]);
 
   const simulate = async (amount: number, reason: string, tracking = 'Delivered Oct 10, signed') => {
     const r = await call('/api/simulate/dispute', { method: 'POST',
@@ -109,7 +131,7 @@ export default function Page() {
   const cols = [
     { field: 'case_id', headerName: 'Case', flex: 1 },
     { field: 'reason', flex: 1 },
-    { field: 'amount', valueFormatter: (p: any) => `${p.data?.currency && p.data.currency !== 'USD' ? p.data.currency + ' ' : ''}$${p.value}` },
+    { field: 'amount', valueFormatter: (p: any) => `${p.data?.currency && p.data.currency !== 'USD' ? p.data.currency + ' ' : '$'}${p.value}` },
     { field: 'urgency', cellClassRules: {
         'u-passed': (p: any) => p.value === 'PASSED',
         'u-critical': (p: any) => p.value === 'CRITICAL',
@@ -151,12 +173,17 @@ export default function Page() {
       `}</style>
       <h1>DisputeDesk — PayPal Dispute Evidence Agent</h1>
       <p style={{ opacity: .7 }}>The AI prepares the case, the seller&apos;s rules decide the money, and every step is logged.</p>
-      {err && <p style={{ color: '#ff7b72', background: '#2d1b1b', padding: 8, borderRadius: 8 }}>{err}</p>}
+      {offline && (
+        <p role="status" style={{ color: '#e3b341', background: '#2b2413', padding: 8, borderRadius: 8 }}>
+          Connecting to the backend at {API}… A free hosted backend can take up to a minute to wake.
+        </p>
+      )}
+      {err && <p role="alert" style={{ color: '#ff7b72', background: '#2d1b1b', padding: 8, borderRadius: 8 }}>{err}</p>}
       {info && <p style={{ color: '#3fb950', background: '#12261a', padding: 8, borderRadius: 8 }}>{info}</p>}
       <div style={{ display: 'flex', gap: 8, margin: '16px 0', flexWrap: 'wrap', alignItems: 'center' }}>
-        <button onClick={() => simulate(29.99, 'ITEM_NOT_RECEIVED')}>Simulate $29 dispute (auto-resolve)</button>
-        <button onClick={() => simulate(25.0, 'UNAUTHORIZED')}>Simulate $25 unauthorized (auto-refund)</button>
-        <button onClick={() => simulate(349.0, 'ITEM_NOT_RECEIVED')}>Simulate $349 dispute (needs approval)</button>
+        <button disabled={busy} onClick={() => simulate(29.99, 'ITEM_NOT_RECEIVED')}>Simulate $29 dispute (auto-resolve)</button>
+        <button disabled={busy} onClick={() => simulate(25.0, 'UNAUTHORIZED')}>Simulate $25 unauthorized (auto-refund)</button>
+        <button disabled={busy} onClick={() => simulate(349.0, 'ITEM_NOT_RECEIVED')}>Simulate $349 dispute (needs approval)</button>
         <select defaultValue="" onChange={e => { if (e.target.value) simulateScenario(e.target.value); e.target.value = ''; }}>
           <option value="">Edge scenarios ▾</option>
           <option value="injection">Prompt-injection buyer</option>
@@ -168,7 +195,7 @@ export default function Page() {
           <option value="already_refunded">Already refunded</option>
           <option value="partial_dispute">Partial dispute ($30 of $180)</option>
         </select>
-        <button onClick={syncFromPayPal}>Sync from PayPal</button>
+        <button disabled={busy} onClick={syncFromPayPal}>Sync from PayPal</button>
         <button onClick={load}>Refresh</button>
         <label style={{ fontSize: 12, opacity: .75, display: 'flex', gap: 6, alignItems: 'center', marginLeft: 'auto' }}>
           Desk token:
@@ -187,7 +214,7 @@ export default function Page() {
                 style={{ width: 72 }} />
             </label>
           ))}
-          <button onClick={savePolicy}>Save policy</button>
+          <button disabled={busy} onClick={savePolicy}>Save policy</button>
         </div>
       )}
       <h3>Case queue (AG Grid) — urgent deadlines float to the top</h3>
@@ -197,7 +224,7 @@ export default function Page() {
       {selected && (
         <div style={{ background: '#151a26', padding: 16, borderRadius: 12, marginTop: 16 }}>
           <h3>
-            {selected.case_id} — {selected.currency && selected.currency !== 'USD' ? `${selected.currency} ` : ''}{selected.amount_known === false ? '$(unknown)' : `$${selected.amount}`} — {selected.status}
+            {selected.case_id} — {selected.currency && selected.currency !== 'USD' ? `${selected.currency} ` : '$'}{selected.amount_known === false ? '(unknown)' : selected.amount} — {selected.status}
             {' '}<span style={{ color: urgencyColor(selected.urgency), fontSize: 16 }}>
               {selected.urgency === 'PASSED' ? '⚠ deadline passed' : selected.urgency !== 'NORMAL' ? `⏳ ${selected.urgency}` : ''}
             </span>
@@ -245,13 +272,13 @@ export default function Page() {
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             {selected.status === 'WAITING_APPROVAL' ? (
               <>
-                <button onClick={() => saveDraft(selected.case_id)}>Save edited draft</button>
-                <button onClick={() => act(selected.case_id, 'approve')}>Approve & Submit to PayPal</button>
+                <button disabled={busy} onClick={() => saveDraft(selected.case_id)}>Save edited draft</button>
+                <button disabled={busy} onClick={() => act(selected.case_id, 'approve')}>Approve & Submit to PayPal</button>
                 <span style={{ opacity: .7 }}>or offer:</span>
                 <input id={`offer-${selected.case_id}`} type="number" step="1" max={selected.amount}
                   placeholder={`max $${selected.amount}`} style={{ width: 100 }} />
-                <button onClick={() => counteroffer(selected.case_id)}>Counteroffer refund</button>
-                <button onClick={() => act(selected.case_id, 'reject')}>Reject</button>
+                <button disabled={busy} onClick={() => counteroffer(selected.case_id)}>Counteroffer refund</button>
+                <button disabled={busy} onClick={() => act(selected.case_id, 'reject')}>Reject</button>
               </>
             ) : (
               <span style={{ opacity: .6 }}>No action needed — {selected.status}</span>
